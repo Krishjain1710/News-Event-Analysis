@@ -1,0 +1,185 @@
+Code:
+import requests
+from bs4 import BeautifulSoup
+import re
+import spacy
+import networkx as nx
+from transformers import pipeline
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+from datetime import datetime
+
+def scrape_news_articles(url):
+    """Scrape the article text from a given URL."""
+    print("📡 Scraping news article...")
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, 'html.parser')
+    paragraphs = soup.find_all('p')
+    article_text = ' '.join([para.get_text() for para in paragraphs])
+    clean_text = re.sub(r'\s+', ' ', article_text)  # Remove extra whitespace
+    clean_text = clean_text.encode('utf-8', 'ignore').decode('utf-8')  # Remove invalid utf-8 characters
+    print("✅ Scraping complete. Extracted text length:", len(clean_text), flush=True)
+    return clean_text
+
+def extract_events(text):
+    """Extract events with details like who, what, where, when, and why."""
+    print("📋 Extracting events from text...")
+    nlp = spacy.load("en_core_web_sm")
+    doc = nlp(text)
+    events = []
+
+    for sent in doc.sents:
+        event = {
+            'who': [],
+            'what': '',
+            'where': [],
+            'when': '',
+            'why': '',
+            'sentence': sent.text
+        }
+        for ent in doc.ents:
+            if ent.label_ in ['PERSON', 'ORG']:  # Who
+                event['who'].append(ent.text)
+            if ent.label_ in ['GPE', 'LOC']:  # Where
+                event['where'].append(ent.text)
+            if ent.label_ in ['DATE', 'TIME']:  # When
+                event['when'] = ent.text
+        
+        for token in sent:
+            if token.dep_ == "ROOT" and token.pos_ == "VERB":  # Event trigger
+                event['what'] = token.text
+                break
+        
+        if event['what']:
+            events.append(event)
+    
+    print(f"✅ Extracted {len(events)} events with who, what, where, and when details.", flush=True)
+    return events
+
+def extract_causal_relationships(text):
+    """Extract causal relationships (why) using causal cue words."""
+    print("🔍 Extracting causal relationships (why) for events...")
+    causal_clues = ['because', 'due to', 'as a result of', 'since', 'therefore', 'thus']
+    causal_relationships = []
+
+    for clue in causal_clues:
+        matches = re.finditer(rf'(.+?)\b{clue}\b(.+?)\.', text, re.IGNORECASE)
+        for match in matches:
+            cause = match.group(1).strip()
+            effect = match.group(2).strip()
+            causal_relationships.append({
+                'cause': cause,
+                'effect': effect,
+                'clue': clue
+            })
+    
+    print(f"✅ Extracted {len(causal_relationships)} causal relationships.", flush=True)
+    return causal_relationships
+
+def link_events(events):
+    """Link events into an event graph using NetworkX."""
+    print("🔗 Linking events into an event graph...")
+    graph = nx.DiGraph()  # Directed graph
+    for i, event in enumerate(events):
+        graph.add_node(i, sentence=event['sentence'], details=event)
+        if i > 0:
+            graph.add_edge(i - 1, i, relationship='follows')
+    print(f"✅ Event graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges.", flush=True)
+    return graph
+
+def predict_outcomes(event_sentences):
+    """Predict the outcomes for each event sentence using a zero-shot classification model."""
+    print("🧠 Predicting outcomes for events...")
+    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+    possible_outcomes = ["political change", "economic shift", "social unrest", "policy change", "no impact"]
+    predictions = []
+
+    for event in event_sentences:
+        try:
+            result = classifier(event, possible_outcomes)
+            predicted_outcome = result['labels'][0]  # Most likely outcome
+            predictions.append({
+                'event': event,
+                'predicted_outcome': predicted_outcome,
+                'confidence': result['scores'][0]
+            })
+        except Exception as e:
+            print(f"⚠ Error predicting outcome for event: {event}. Error: {e}", flush=True)
+    
+    print(f"✅ Predictions completed for {len(event_sentences)} events.", flush=True)
+    return predictions
+
+def sentiment_analysis(event_sentences):
+    """Analyze the sentiment of each event sentence using NLTK's VADER Sentiment Analyzer."""
+    print("🤔 Analyzing sentiment of event descriptions...")
+    nltk.download('vader_lexicon', quiet=True)
+    sia = SentimentIntensityAnalyzer()
+    sentiment_results = []
+
+    for sentence in event_sentences:
+        sentiment_score = sia.polarity_scores(sentence)
+        sentiment = 'positive' if sentiment_score['compound'] > 0.05 else \
+                    'negative' if sentiment_score['compound'] < -0.05 else 'neutral'
+        sentiment_results.append({
+            'sentence': sentence,
+            'sentiment': sentiment,
+            'score': sentiment_score['compound']
+        })
+    
+    print(f"✅ Sentiment analysis completed for {len(event_sentences)} events.", flush=True)
+    return sentiment_results
+
+def full_pipeline(news_url):
+    """Run the full pipeline for news scraping, event extraction, event linking, outcome prediction, and sentiment analysis."""
+    article_text = scrape_news_articles(news_url)
+
+    # Step 2: Extract events
+    events = extract_events(article_text)
+
+    # Step 3: Extract causal relationships
+    causal_relationships = extract_causal_relationships(article_text)
+
+    event_sentences = [event['sentence'] for event in events]
+
+    # Step 4: Link the extracted events
+    event_graph = link_events(events)
+
+    # Step 5: Predict the potential outcomes for the extracted events
+    outcomes = predict_outcomes(event_sentences)
+
+    # Step 6: Perform sentiment analysis on the extracted event descriptions
+    sentiment_results = sentiment_analysis(event_sentences)
+
+    return {
+        'url': news_url,
+        'article_text': article_text,
+        'events': events,
+        'causal_relationships': causal_relationships,
+        'event_graph': event_graph,
+        'outcomes': outcomes,
+        'sentiment_results': sentiment_results
+    }
+
+def main():
+    """Accepts a URL input from the user and runs the full pipeline."""
+    url = input("📡 Enter the news URL: ").strip()
+    if not url.startswith("http"):
+        print("⚠ Invalid URL. Please enter a valid URL starting with http or https.")
+        return
+
+    results = full_pipeline(url)
+
+    print(f"🔗 Input URL: {url}")
+    for i, event in enumerate(results['events'][:3]):
+        print(f"\n🔄 Event {i+1}: {event['sentence']}")
+        print(f"   Who: {', '.join(event['who'])}")
+        print(f"   What: {event['what']}")
+        print(f"   Where: {', '.join(event['where'])}")
+        print(f"   When: {event['when']}")
+    
+    print("\n🔍 Causal Relationships (Why)")
+    for i, cause in enumerate(results['causal_relationships'][:3]):
+        print(f"Cause: {cause['cause']} | Effect: {cause['effect']} (Clue: {cause['clue']})")
+
+if _name_ == "_main_":
+    main()
